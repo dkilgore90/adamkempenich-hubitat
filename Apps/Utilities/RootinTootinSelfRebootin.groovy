@@ -1,5 +1,5 @@
 /**
- *   Rootin' Tootin' Self-Rebootin' (0.97)
+ *   Rootin' Tootin' Self-Rebootin' (1.00)
  *
  *   Author:
  *       Adam Kempenich
@@ -7,6 +7,9 @@
  *   Documentation: https://community.hubitat.com/t/release-rootin-tootin-self-rebootin-hub-0-9/27863
  *
  *  Changelog:
+ *    1.00 (Sept 26, 2022) - @dkilgore90 changes
+ *        - Use localhost for API calls to hub
+ *        - Add ping check for network reachability
  *    0.97 (Mar 22, 2020) - More @codahq changes
  *        - Fixed CRON another way
  *        - Added a way to reset the boot loop counter
@@ -76,6 +79,9 @@ preferences {
       input "rebootDuringMaintenance", "bool", title: "Allow Reboot During Maintenance?", Description: "Allow RTSR to reboot the hub during the nightly maintenance window?", default: false
       input "logLevel", "enum", title: "Logging Level", options: [1: "Error", 2: "Warn", 3: "Info", 4: "Debug", 5: "Trace"], required: false
     }
+    section {
+        input 'reboot', 'button', title: 'Manual Reboot', submitOnChange: true
+    }
   }
   page(name: "reset")
 }
@@ -117,12 +123,20 @@ def initialize() {
   logInfo "Scheduled a Rootin' Tootin' Startup in ${60 * settings.startupDelayTime.toInteger()} seconds"
 }
 
+def appButtonHandler(btn) {
+    switch (btn) {
+    case 'reboot':
+        getCookie(true)
+        break
+    }
+}
+
 def getCookie(doReboot = false) {
 
   def body = "username=${username}&password=${password}"
 
   def params = [
-    uri: "http://${hubIP}:8080",
+    uri: "http://localhost:8080",
     path: '/login',
     requestContentType: 'application/x-www-form-urlencoded',
     contentType: 'application/x-www-form-urlencoded',
@@ -144,11 +158,11 @@ def sendReboot() {
 
   if (!hubRequiresPassword) {
     // NO-COOKIE METHOD
-    asynchttpPost('rebootResponse', [uri: "http://${hubIP}:8080/hub/reboot"])
+    asynchttpPost('rebootResponse', [uri: "http://localhost:8080/hub/reboot"])
   }
   else {
     // COOKIE METHOD
-    asynchttpPost('rebootResponse', [uri: "http://${hubIP}:8080", path: '/hub/reboot', headers: ['Cookie': "${state.storedCookie}"]])
+    asynchttpPost('rebootResponse', [uri: "http://localhost:8080", path: '/hub/reboot', headers: ['Cookie': "${state.storedCookie}"]])
   }
 
   state.loopCounter++
@@ -169,7 +183,7 @@ def startApp() {
     logError "The hub has rebooted too many times in a row (${state.loopCounter} times). This app will now stop."
   }
   else {
-    logInfo "Scheduling Rootin' Tootin' check-ins and readability tests"
+    logInfo "Scheduling Rootin' Tootin' check-ins, pings, and readability tests"
     schedule("0/${settings.checkEveryNSeconds.toInteger() / 2} * * * * ?", checkIn)
     schedule("0${settings.checkEveryNSeconds == "60" ? "" : "/${settings.checkEveryNSeconds}"} * * * * ?", rebootTest)
     if (rebootOnSevereLoad) {
@@ -189,20 +203,32 @@ def parseResponse(response, data) {
 }
 
 def checkIn() {
+    logTrace("Writing timestamp to db")
   state.checkInTime = now()
+}
+
+def pingTest() {
+    logTrace "Checking hub for network reachability (ping)..."
+    def pingData = hubitat.helper.NetworkUtils.ping(hubIP)
+    //Tolerate up to 1 packet loss (out of 3)
+    if (pingData.packetLoss <= 1) {
+        return true
+    } else {
+        logError("Ping test failed")
+        return false
+    }
 }
 
 def rebootTest() {
 
   logInfo "Checking hub for DB readability..."
   try {
-    if ((now() - state.checkInTime) / 1000 > settings.checkEveryNSeconds.toInteger()) {
-      // If the current time minus the last time checked in is more seconds than the last scheduled check in, reboot
-      getCookie(true)
-    }
-    else {
+    if (((now() - state.checkInTime) / 1000 > settings.checkEveryNSeconds.toInteger()) || !pingTest()) {
+        // If the current time minus the last time checked in is more seconds than the last scheduled check in, or ping test failed, reboot
+        getCookie(true)
+    } else {
       state.loopCounter = 0
-      logInfo "DB read success. Boot loop counter has been restarted."
+      logInfo "DB read/ping success. Boot loop counter has been restarted."
     }
   }
   catch (e) {
